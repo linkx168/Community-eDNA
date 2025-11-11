@@ -1,0 +1,771 @@
+---
+title: "community_eDNA_anlysis"
+author: "Denver Link"
+date: "2025-05-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# Preamble
+This is the analysis of community eDNA detection and contamination. Inference is made across lakes and within lakes. Sample processing was split between two labs(Natural Resources Research Institute and the University of Illinois). Data from each lab were aggregated outside of this for complete and ease of analysis. Original data is available on request. Specifics to note:
+1. Common carp were not tested for at the UI lab
+2. NRRI reported a mean with SD, UI reported values for each of the 3 replicates
+      -the mean and sd were derivative from those replicates for UI samples 
+3. Data availability between labs
+     -No samples dates for UI samples 
+     -Blanks for UI samples did not specify which lake they were for
+4. If a sample had DNA but was below LOD, I reported it as a NON-DETECTION
+
+
+# Library
+```{r}
+library(tidyverse)
+library(maps)
+library(ggrepel)
+library(ggspatial)
+library(grid)
+library(tidytext)
+library(patchwork)
+library(tigris)
+library(sf)
+library(ggimage)
+library(grid)
+library(rnaturalearth)
+library(cowplot)
+library(ggtext)
+```
+
+# Data
+```{r}
+edna <- read_csv("edna_community.csv")
+glimpse(edna)
+
+rounds <- tribble(
+  ~lake, ~`species_present`, ~`species_missed`, ~`new_detected`,
+  "Forest Lake", "Common Carp, Zebra Mussel", NA, "Rusty Crayfish",
+  "Island Lake Reservoir","Spiny Water Flea", "Spiny Water Flea", NA, 
+  "Leech Lake", "Rusty Crayfish, Zebra Mussel", NA, "Common Carp",
+  "Mille Lacs Lake", "Common Carp, Spiny Water Flea, Zebra Mussel", "Spiny Water Flea", "Rusty Crayfish",
+  "Lake Owasso", "Common Carp, Zebra Mussel, Rusty Crayfish", "Rusty Crayfish", "Spiny Water Flea",
+  "Lake Phalen", "Common Carp, Rusty Crayfish", NA, NA,
+  "Prior Lake", "Common Carp, Zebra Mussel", NA, "Rusty Crayfish",
+  "Shagawa Lake", "Rusty Crayfish, Spiny Water Flea", "Spiny Water Flea", "Common Carp",
+  "Lake Vermilion", "Rusty Crayfish, Spiny Water Flea", NA, "Zebra Mussel",
+  "White Bear Lake", "Common Carp, Zebra Mussel", NA, "Rusty Crayfish"
+)
+glimpse(rounds)
+
+# updating known AIS based on Rounds et al. 2024 detections 
+known_species <- rounds %>% 
+  mutate(known_ais_rounds = case_when(!is.na(species_present) & !is.na(new_detected) ~ str_c(species_present, new_detected, sep = ", "),
+                           TRUE ~ species_present)) %>% 
+  distinct(lake, known_ais_rounds)
+
+edna <- edna %>% 
+  left_join(known_species) %>% 
+  select(-known_ais) %>% 
+  rename(known_ais = known_ais_rounds) %>% 
+  relocate(known_ais, .after = longitude)
+
+edna %>% 
+  filter(sample_type == "Sample") %>% 
+  distinct(lake, known_ais)
+rm(known_species)
+```
+
+# Known invasions vs. testing
+```{r}
+known_ais <- edna %>% 
+  filter(sample_type == "Sample") %>% 
+  distinct(lake, known_ais)
+
+tested_ais <- edna %>% 
+  filter(sample_type == "Sample") %>% 
+  distinct(lake, species) %>% 
+  group_by(lake) %>% 
+  summarise(species_tested = paste(species, collapse = ", ")) %>% 
+  ungroup()
+
+known_tested_compare <- known_ais %>% 
+  left_join(tested_ais)
+
+known_long <- known_tested_compare %>%
+  # Expand each comma-separated list into long rows
+  separate_rows(known_ais, sep = ", ") %>%
+  separate_rows(species_tested, sep = ", ") %>%
+  mutate(across(c(known_ais, species_tested), trimws)) %>%
+  # Create presence flags
+  pivot_longer(cols = c(known_ais, species_tested),
+               names_to = "type", values_to = "species") %>%
+  distinct(lake, species, type) %>%
+  mutate(value = 1) %>%
+  pivot_wider(names_from = type, values_from = value, values_fill = 0) %>%
+  # Categorize into the 3 groups of interest
+  mutate(category = case_when(
+    known_ais == 1 & species_tested == 1 ~ "Rounds Detect & Tested",
+    known_ais == 0 & species_tested == 1 ~ "Tested but No Rounds Detect",
+    known_ais == 1 & species_tested == 0 ~ "Rounds Detect but Not Tested",
+    TRUE ~ "Neither"
+  ))
+rm(known_ais, tested_ais, known_tested_compare)
+
+known_long %>%
+  count(lake, category) %>%
+  ggplot(aes(x = reorder(lake, n), y = n, fill = category)) +
+  geom_col(position = "fill") +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Species per Lake by AIS Status",
+       x = "Lake", y = "Proportion of Species")
+
+known_long %>%
+  count(species, category) %>%
+  ggplot(aes(x = reorder(species, n), y = n, fill = category)) +
+  geom_col(position = "stack") +
+  coord_flip() +
+  labs(title = "Testing vs Confirmation Patterns by Species",
+       x = "Species", y = "Count of Lakes")
+
+known_long %>% 
+  ggplot() +
+  geom_tile(aes(x = species,y= lake, fill = category),color = "white") +
+  scale_fill_manual(values = c(
+    "Rounds Detect & Tested" = "green",
+    "Rounds Detect but Not Tested" = "red",
+    "Tested but No Rounds Detect" = "yellow"
+  )) +
+  labs(x = NULL, y = NULL) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.text.y = element_text(angle = 45, hjust = 1, size = 8),
+        legend.key.size = unit(0.6, "lines"),
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9))
+#ggsave("testing_matrix.jpg", height = 5, width = 6)
+rm(known_long)
+```
+
+# 2x2 confusion matrix with Rounds et al.
+```{r}
+community <- edna %>% 
+  filter(sample_type == "Sample") %>% 
+  distinct(lake, species, species_detect) %>% 
+  group_by(lake, species) %>% 
+  mutate(species_detected_community = case_when(any(species_detect == "Y") ~ "Y",
+                                   T ~ "N")) %>% 
+  ungroup() %>% 
+  distinct(lake, species, species_detected_community)
+
+rounds_lakes <- community %>%
+  distinct(lake, species)
+
+rounds <- rounds_lakes %>% 
+  left_join(rounds, by = "lake")
+rm(rounds_lakes)
+
+rounds_check <- rounds %>%
+  mutate(
+    species_detected_rounds = case_when(
+      #N if a species is detected in species missed column
+      str_detect(species_missed, fixed(species, ignore_case = TRUE)) ~ "N",
+      #Y if species is in the species column and it is not in the missed column
+      str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        !str_detect(species_missed, fixed(species, ignore_case = TRUE)) ~ "Y",
+      str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        is.na(species_missed) ~ "Y",
+      #Y if species is in the new detection column but not in the present column
+      str_detect(new_detected, fixed(species, ignore_case = TRUE)) &
+        !str_detect(species_present, fixed(species, ignore_case = TRUE)) ~ "Y",
+      #N if a species is not in species present and it is not in the new detetion 
+      !str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        !str_detect(new_detected, fixed(species, ignore_case = TRUE)) ~ "N",
+      !str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        is.na(new_detected) ~ "N",
+      #otherwise return N
+      TRUE ~ NA
+    )
+  )
+rm(rounds_check)
+
+rounds <- rounds %>% 
+    mutate(
+    species_detected_rounds = case_when(
+      #N if a species is detected in species missed column
+      str_detect(species_missed, fixed(species, ignore_case = TRUE)) ~ "N",
+      #Y if species is in the species column and it is not in the missed column
+      str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        !str_detect(species_missed, fixed(species, ignore_case = TRUE)) ~ "Y",
+      str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        is.na(species_missed) ~ "Y",
+      #Y if species is in the new detection column but not in the present column
+      str_detect(new_detected, fixed(species, ignore_case = TRUE)) &
+        !str_detect(species_present, fixed(species, ignore_case = TRUE)) ~ "Y",
+      #N if a species is not in species present and it is not in the new detetion 
+      !str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        !str_detect(new_detected, fixed(species, ignore_case = TRUE)) ~ "N",
+      !str_detect(species_present, fixed(species, ignore_case = TRUE)) &
+        is.na(new_detected) ~ "N",
+      #otherwise return N
+      TRUE ~ NA
+    )
+  ) %>% 
+  select(lake, species, species_detected_rounds)
+
+matrix <- community %>% 
+  left_join(rounds)
+rm(community, rounds)
+
+matrix %>% 
+  summarise(yy = sum(species_detected_community == "Y" & species_detected_rounds == "Y"),
+            nn = sum(species_detected_community == "N" & species_detected_rounds == "N"),
+            yn = sum(species_detected_community == "Y" & species_detected_rounds == "N"),
+            ny = sum(species_detected_community == "N" & species_detected_rounds == "Y"))
+#71% agreement
+#9 cases where we did not detect in community but rounds did
+#1 case where we detected by rounds did not
+
+matrix %>% 
+  filter(species_detected_community == "N" & species_detected_rounds == "Y")
+
+matrix %>% 
+  filter(species_detected_community == "Y" & species_detected_rounds == "N")
+rm(matrix)
+```
+
+# Probability of detection stats
+```{r}
+#species level prob of detection - across lakes 
+prob.detect.species <- edna %>% 
+  #filter out blanks
+  filter(sample_type == "Sample") %>%
+  #should we expect the species in the sample?
+  mutate(ais_expected = case_when(str_detect(known_ais, species) ~ "Y",
+                                  TRUE ~ "N")) %>% 
+  #summary of detection compared to total number of samples
+  filter(ais_expected == "Y") %>% 
+  group_by(species) %>%  
+  summarise(sum.detect = sum(species_detect == "Y"),
+            n_lakes = n_distinct(lake),
+            total = sum(species_detect == "Y" | species_detect == "N"),
+            umn_prob_detect = mean(umn_prob_detect)) %>% 
+  mutate(prob.detect = sum.detect/total) 
+prob.detect.species
+
+#lake level prob of detection
+prob.detect.lake <- edna %>% 
+  #filter out blanks
+  filter(sample_type == "Sample") %>%
+  #should we expect the species in the sample?
+  mutate(ais_expected = case_when(str_detect(known_ais, species) ~ "Y",
+                                  TRUE ~ "N")) %>% 
+  #summary of detection for each lake-species combo compared to total number of samples
+  group_by(lake, species, ais_expected, umn_prob_detect) %>%  
+  summarise(sum.detect = sum(species_detect == "Y"),
+            total = sum(species_detect == "Y" | species_detect == "N")) %>% 
+  mutate(prob.detect = sum.detect/total) 
+
+prob.detect.lake %>% 
+  arrange(ais_expected, species) %>% 
+  print(n = nrow(.))
+
+prob.detect.lake %>% 
+  arrange(ais_expected, lake) %>% 
+  print(n = nrow(.))
+
+prob.detect.lake %>% 
+  ungroup() %>% 
+  filter(ais_expected == "Y") %>% 
+  summarise(citizen_better = sum(prob.detect > umn_prob_detect),
+            total_samples = n(),
+            prop.better = citizen_better/total_samples)
+
+prob.detect.lake %>% 
+  ungroup() %>% 
+  filter(ais_expected == "Y") %>% 
+  filter(prob.detect < umn_prob_detect)
+
+#contamination 
+contamination <- edna %>% 
+  #filter for blanks
+  filter(sample_type == "Field blank") %>%
+  #check number of species detection in lake-species combos
+  group_by(lake, species) %>% 
+  summarise(sum.detect = sum(species_detect == "Y"),
+            total = sum(species_detect == "Y" | species_detect == "N")) %>% 
+  mutate(prob.detect = sum.detect/total)
+
+contamination %>% 
+  print(n = nrow(.))
+
+contamination.species <- edna %>% 
+  #filter for blanks
+  filter(sample_type == "Field blank") %>%
+  #check number of species detection in lake-species combos
+  group_by(species) %>% 
+  summarise(sum.detect = sum(species_detect == "Y"),
+            total = sum(species_detect == "Y" | species_detect == "N")) %>% 
+  mutate(prob.detect = sum.detect/total)
+contamination.species
+
+edna %>% 
+  #filter for blanks
+  filter(sample_type == "Field blank") %>%
+  filter(species_detect == "Y") %>% 
+  distinct(lake, species, sampling_notes)
+#makes sense why this is a contamination!
+```
+
+# probability of detection - visuals
+```{r}
+#lake level probability of detection
+edna_lake <- edna %>% 
+  left_join(prob.detect.lake)
+
+#vertical comparison - no comparison of probability 
+edna_lake %>%  
+  filter(ais_expected == "Y") %>% 
+  filter(sample_type == "Sample") %>% 
+  distinct(lake, species, .keep_all = TRUE) %>% 
+  ggplot() +
+  geom_col(aes(y = lake, x = prob.detect, fill = lake)) +
+  facet_wrap(~species, ncol = 1, scales = "free_y") +
+  theme(legend.position = "bottom") +
+  xlab("Probability of Detection") +
+  guides(fill = "none") +
+  theme_bw() 
+
+#vertical comparison with probability comparison to Rounds et al 2024
+edna_lake %>% 
+  filter(ais_expected == "Y") %>%
+  distinct(lake, species, .keep_all = TRUE) %>%
+  arrange(prob.detect) %>%
+  mutate(lake = factor(lake, levels = unique(lake))) %>%
+  ggplot() +
+  geom_col(aes(y = tidytext::reorder_within(lake, prob.detect, species), x = prob.detect, fill = lake)) +
+  geom_point(aes(y = tidytext::reorder_within(lake, prob.detect, species), x = umn_prob_detect), size = 2, shape = 17) +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~species, ncol = 1, scales = "free_y") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(size = "12")
+  ) +
+  xlab("Probability of Detection") +
+  ylab("")
+#ggsave("species_lake_prob_detect.jpg", height = 6, width = 4)
+
+#species level comparions
+prob.detect.species %>% 
+  pivot_longer(cols = c(prob.detect, umn_prob_detect), 
+               names_to = "source", 
+               values_to = "prob_detect") %>% 
+  mutate(source = case_when(source == "prob.detect" ~ "Community Samples",
+                            TRUE ~ "Rounds et al. 2024")) %>% 
+  ggplot() +
+  geom_col(aes(x = species, y = prob_detect, fill = source), position = position_dodge()) +
+  scale_fill_manual("", values = c("gray", "black")) +
+  theme_bw() +
+  theme(
+    legend.position = c(0.2, 0.9),
+    legend.key.size = unit(0.5, "lines"),
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(size = "12"),
+    axis.text.x = element_text(size = 6)
+  ) +
+  ylab("Probability of Detection") +
+  xlab("")
+#ggsave("species_prob_compare.jpg", height = 4, width = 4)
+
+#combination of lake and species
+spec_join <- prob.detect.species %>% 
+  mutate(lake = "All Lakes",
+         ais_expected = "Y")
+glimpse(spec_join)
+
+lake.species <- bind_rows(edna_lake, spec_join)
+rm(spec_join)
+
+lake.species %>%
+  filter(ais_expected == "Y") %>%
+  distinct(lake, species, .keep_all = TRUE) %>%
+  mutate(
+    # Make a flag for ordering
+    all_lakes_flag = if_else(lake == "All Lakes", 1, 0),
+    fill_color = case_when(lake == "All Lakes" ~ "gray50",
+                           TRUE ~ "gray")
+  ) %>%
+  # reorder_within uses both the flag and prob.detect
+  ggplot() +
+  geom_col(aes(
+    y = tidytext::reorder_within(lake, all_lakes_flag*100 + prob.detect, species),
+    x = prob.detect,
+    fill = fill_color
+  )) +
+  geom_point(aes(
+    y = tidytext::reorder_within(lake, all_lakes_flag*100 + prob.detect, species),
+    x = umn_prob_detect
+  ), size = 2, shape = 17) +
+  scale_fill_identity() +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~species, ncol = 1, scales = "free_y") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(size = 12),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
+  ) +
+  xlab("Probability of Detection") +
+  ylab("") 
+#ggsave("species_lake_combined.jpg", dpi = 600, height = 6, width = 4)
+
+#both but in pannels
+spec <- prob.detect.species %>% 
+  pivot_longer(cols = c(prob.detect, umn_prob_detect), 
+               names_to = "source", 
+               values_to = "prob_detect") %>% 
+  mutate(source = case_when(source == "prob.detect" ~ "Community Samples",
+                            TRUE ~ "Rounds et al. 2024")) %>% 
+  ggplot() +
+  geom_col(aes(x = species, y = prob_detect, fill = source), position = position_dodge()) +
+  scale_fill_manual("", values = c("gray", "black")) +
+  ylim(c(0, 1)) +
+  theme_bw() +
+  theme(
+    legend.position = c(0.4, 0.9),
+    legend.key.size = unit(0.5, "lines"),
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(size = "12"),
+    axis.text.x = element_text(size = 8, angle = 20, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) +
+  ylab("Probability of Detection") +
+  xlab("")
+spec
+
+
+lake <- edna_lake %>% 
+  filter(ais_expected == "Y") %>%
+  distinct(lake, species, .keep_all = TRUE) %>%
+  arrange(prob.detect) %>%
+  mutate(lake = factor(lake, levels = unique(lake))) %>%
+  ggplot() +
+  geom_col(aes(y = tidytext::reorder_within(lake, prob.detect, species), x = prob.detect, fill = "gray")) +
+  geom_point(aes(y = tidytext::reorder_within(lake, prob.detect, species), x = umn_prob_detect), size = 2, shape = 17) +
+  scale_fill_identity() +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~species, ncol = 1, scales = "free_y") +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.background = element_rect(fill = "white"),
+    strip.text = element_text(size = "12"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y =element_blank() 
+  ) +
+  xlab("Probability of Detection") +
+  ylab("")
+lake
+
+both <- spec + lake + plot_layout(ncol = 2, widths = c(1, 1))
+both
+ggsave(filename = "panneled_plot.jpg", dpi = 600, height = 7, width = 7)
+
+both <- spec + lake + plot_layout(ncol = 1)
+both
+#ggsave(filename = "panneled_plot_vert.jpg", dpi = 600, height = 7, width = 5)
+
+
+#contamination visual
+contamination %>% 
+  group_by(species) %>% 
+  summarise(sum.detect = sum(sum.detect),
+            total = sum(total),
+            prob.detect = sum.detect/total) %>% 
+  ggplot() +
+  geom_col(aes(x = species, y = prob.detect)) +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        axis.title.y = element_text(size = 10)) +
+  coord_cartesian(ylim = c(0, 1)) +
+  guides(fill = "none") +
+  ylab("Proportion of Contamination") +
+  xlab("") 
+#ggsave("contamination.jpg", width = 4, height = 4)
+rm(both, lake, spec)
+```
+
+# map
+```{r}
+mn_map <- map_data("state", region = "minnesota")
+map_data <- edna %>% 
+  mutate(ais_expected = case_when(str_detect(known_ais, species) ~ "Y",
+                                  TRUE ~ "N")) %>%
+  filter(ais_expected == "Y") %>% 
+  distinct(lake, .keep_all = T) 
+
+#map of lakes
+
+ggplot() +
+  # Plot the Minnesota map
+  geom_polygon(data = mn_map, aes(x = long, y = lat, group = group), fill = "white", color = "black") +
+  # Plot the lake points
+  geom_point(data = map_data, aes(x = longitude, y = latitude), size = 6) +
+  geom_text_repel(data = map_data, aes(x = longitude, y = latitude, label = lake), size = 5, box.padding = unit(0.5, "lines")) +
+  theme_minimal() +
+  # # Add the north arrow
+  # annotation_north_arrow(location = "br", which_north = "true", 
+  #                        pad_x = unit(.5, "in"), pad_y = unit(0.5, "in"),
+  #                        style = north_arrow_fancy_orienteering) +
+  # # Add the scale bar
+  # annotation_scale(location = "br", width_hint = 0.2, 
+  #                  pad_x = unit(.5, "in"), pad_y = unit(0.2, "in")) +
+  coord_fixed()
+#ggsave("mn_map_no_ais.jpg", height = 5, width = 5, dpi = 600)
+
+
+#plot formatted for known ais
+# ggplot() +
+#   # Plot the Minnesota map
+#   geom_polygon(data = mn_map, aes(x = long, y = lat, group = group), fill = "white", color = "black") +
+#   # Plot the lake points
+#   geom_point(data = map_data, aes(x = longitude, y = latitude, color = known_ais, shape = known_ais), size = 6) +
+#   # Add labels to the points
+#   geom_text_repel(data = map_data, aes(x = longitude, y = latitude, label = lake), size = 5, box.padding = unit(0.5, "lines")) +
+#   # Add the north arrow
+#   annotation_north_arrow(location = "br", which_north = "true", 
+#                          pad_x = unit(.5, "in"), pad_y = unit(0.5, "in"),
+#                          style = north_arrow_fancy_orienteering) +
+#   # Add the scale bar
+#   annotation_scale(location = "br", width_hint = 0.2, 
+#                    pad_x = unit(.5, "in"), pad_y = unit(0.2, "in")) +
+#   scale_shape_manual(values = c(15, 16, 17, 18, 12, 13, 11)) +
+#   guides(color = guide_legend(ncol=2, nrow = 4, byrow = TRUE, title.position = "top"),
+#          shape = guide_legend(ncol=2, nrow = 4, byrow = TRUE, title.position = "top")) +
+#   coord_fixed() +
+#   theme_void() +
+#   theme(legend.position = "bottom",
+#         legend.title = element_text(size = 10),
+#         legend.text = element_text(size = 8),
+#         legend.box.background = element_rect(color = "black", size = .2),
+#         legend.box.margin = margin(10, 10, 10, 8),
+#         plot.margin = margin(10, 10, 20, 10),
+#         legend.title.align = .5) +
+#   labs(color = "Known AIS in Lake", shape = "Known AIS in Lake")
+#ggsave("mn_map_plot.jpg", height = 7, width = 5, dpi = 600)
+
+#trying with icons
+icon_lookup <- tibble(lake = c("Forest Lake",
+                            "Island Lake Reservoir",
+                            "Lake Owasso",
+                            "Lake Phalen",
+                            "Lake Vermilion",
+                            "Leech Lake",
+                            "Mille Lacs Lake",
+                            "Prior Lake",
+                            "Shagawa Lake",
+                            "White Bear Lake"),
+                species_icon = c("icons/forest_lake.jpg",
+                                 "icons/island_lake.jpg",
+                                 "icons/owasso.jpg",
+                                 "icons/phalen.jpg",
+                                 "icons/vermilion.jpg",
+                                 "icons/leech.jpg",
+                                 "icons/mille_lacs.jpg",
+                                 "icons/prior.jpg",
+                                 "icons/shagawa.jpg",
+                                 "icons/white_bear.jpg"))
+
+
+map_plot_data <- map_data %>%
+  left_join(icon_lookup, by = "lake") %>%
+  mutate(nudge_x = case_when(
+      lake == "Lake Vermilion" ~ -0.4,
+      lake == "Shagawa Lake" ~ 0.75,
+      lake == "Island Lake Reservoir" ~ -0.4,
+      lake == "Leech Lake" ~ -0.4,
+      lake == "Mille Lacs Lake" ~ -0.4,
+      lake == "Forest Lake" ~ .55,
+      lake == "White Bear Lake" ~ -.8,
+      lake == "Lake Phalen" ~ 0.8,
+      lake == "Lake Owasso" ~ -0.8,
+      lake == "Prior Lake" ~ .35,
+      TRUE ~ 0
+    ),
+    nudge_y = case_when(
+      lake == "Lake Vermilion" ~ 0, 
+      lake == "Shagawa Lake" ~ -0.15,
+      lake == "Island Lake Reservoir" ~ 0,
+      lake == "Leech Lake" ~ 0.1,
+      lake == "Mille Lacs Lake" ~ .3,
+      lake == "Forest Lake" ~ 0.25,
+      lake == "White Bear Lake" ~ .6,
+      lake == "Lake Phalen" ~ -.1,
+      lake == "Lake Owasso" ~ 0,
+      lake == "Prior Lake" ~ -.4,
+      TRUE ~ 0,
+    ),
+    icon_size = case_when(
+      lake == "Lake Vermilion" ~ 30, 
+      lake == "Shagawa Lake" ~ 30,
+      lake == "Island Lake Reservoir" ~ 30,
+      lake == "Leech Lake" ~ 30,
+      lake == "Mille Lacs Lake" ~ 50,
+      lake == "Forest Lake" ~ 50,
+      lake == "White Bear Lake" ~ 50,
+      lake == "Lake Phalen" ~ 50,
+      lake == "Lake Owasso" ~ 50,
+      lake == "Prior Lake" ~ 50),
+    label_with_icon = paste0(
+      lake, "<br><img src='", species_icon, "' width='", icon_size, "'/>"
+  ))
+
+ggplot() +
+  # Base map
+  geom_polygon(data = mn_map, aes(x = long, y = lat, group = group),
+               fill = "white", color = "gray") +
+  geom_point(data = map_plot_data, aes(x = longitude, y = latitude),
+             size = 3, color = "gray") +
+  geom_segment(
+    data = map_plot_data,
+    aes(x = longitude, y = latitude,
+        xend = longitude + nudge_x,
+        yend = latitude + nudge_y),
+    color = "gray40", linetype = "dashed"
+  ) +
+  geom_richtext(
+    data = map_plot_data,
+    aes(x = longitude + nudge_x, 
+        y = latitude + nudge_y, 
+        label = label_with_icon),
+    size = 4,
+    label.color = NA,
+    fill = NA
+  ) +
+  theme_minimal() +
+  coord_fixed()
+#ggsave("map_with_icons.jpg", dpi = 600, height = 10, width = 7)
+
+
+#########sf plot###############
+
+# Get MN boundary as sf
+mn_sf <- states(cb = TRUE, resolution = "500k", year = 2020) %>%
+  filter(STUSPS == "MN") %>%
+  st_transform(26915)
+
+# Convert lake points to sf
+lakes_sf <- st_as_sf(map_plot_data, coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(26915)
+
+#  Extract projected coordinates and keep labels with icons
+lakes_proj <- lakes_sf %>%
+  mutate(
+    longitude = st_coordinates(.)[,1],
+    latitude  = st_coordinates(.)[,2]
+  ) %>%
+  st_drop_geometry()
+
+lakes_proj <- lakes_proj %>%
+  mutate(
+    nudge_x = case_when(
+      lake == "Lake Vermilion"        ~ -50000,
+      lake == "Shagawa Lake"          ~ 60000,
+      lake == "Island Lake Reservoir" ~ -45000,
+      lake == "Leech Lake"            ~ -45000,
+      lake == "Mille Lacs Lake"       ~ -25000,
+      lake == "Forest Lake"           ~ 60000,
+      lake == "White Bear Lake"       ~ -50000,
+      lake == "Lake Phalen"           ~ 65000,
+      lake == "Lake Owasso"           ~ -65000,
+      lake == "Prior Lake"            ~ 12000,
+      TRUE ~ 0
+    ),
+    nudge_y = case_when(
+      lake == "Lake Vermilion"        ~ 2000,
+      lake == "Shagawa Lake"          ~ -3000,
+      lake == "Island Lake Reservoir" ~ 0,
+      lake == "Leech Lake"            ~ 6000,
+      lake == "Mille Lacs Lake"       ~ 30000,
+      lake == "Forest Lake"           ~ 20000,
+      lake == "White Bear Lake"       ~ 60000,
+      lake == "Lake Phalen"           ~ -8000,
+      lake == "Lake Owasso"           ~ 0,
+      lake == "Prior Lake"            ~ -40000,
+      TRUE ~ 0
+    ),
+    icon_size = case_when(
+      lake == "Lake Vermilion" ~ 60, 
+      lake == "Shagawa Lake" ~ 60,
+      lake == "Island Lake Reservoir" ~ 60,
+      lake == "Leech Lake" ~ 50,
+      lake == "Mille Lacs Lake" ~ 100,
+      lake == "Forest Lake" ~ 75,
+      lake == "White Bear Lake" ~ 75,
+      lake == "Lake Phalen" ~ 75,
+      lake == "Lake Owasso" ~ 75,
+      lake == "Prior Lake" ~ 75),
+    label_with_icon = paste0(
+      lake, "<br><img src='", species_icon, "' width='", icon_size, "'/>"
+  ))
+
+key <- jpeg::readJPEG("icons/key.jpg")
+key_grob <- rasterGrob(key, interpolate = T)
+
+mn_map <- ggplot() +
+  geom_sf(data = mn_sf, fill = "white", color = "gray50") +
+  geom_point(data = lakes_proj, aes(x = longitude, y = latitude), size = 3, color = "lightblue") +
+  labs(x = NULL,
+       y = NULL) +
+  geom_segment(
+    data = lakes_proj,
+    aes(x = longitude, y = latitude,
+        xend = longitude + nudge_x,
+        yend = latitude + nudge_y),
+    color = "gray40", linetype = "dashed"
+  ) +
+  geom_richtext(
+    data = lakes_proj,
+    aes(x = longitude + nudge_x, y = latitude + nudge_y, label = label_with_icon),
+    size = 4,
+    label.color = NA,
+    fill = NA
+  ) +
+  annotation_custom(
+    key_grob,
+    xmin = st_bbox(mn_sf)$xmin,   # left
+    xmax = st_bbox(mn_sf)$xmin + 150000,  # adjust width
+    ymin = st_bbox(mn_sf)$ymax - 600000,  # adjust height
+    ymax = st_bbox(mn_sf)$ymax - 300000
+  ) +
+  annotation_scale(location = "br", width_hint = 0.3) +
+  annotation_north_arrow(location = "bl", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  coord_sf()
+mn_map
+#ggsave("sf_icon_map.jpg", height = 10, width = 8, dpi = 600)
+
+#with inset
+us_sf <- ne_states(country = "United States of America", returnclass = "sf") %>%
+  st_transform(26915) %>% 
+  filter(!name %in% c("Alaska", "Hawaii"))
+
+mn_boundary <- us_sf %>% filter(name == "Minnesota")
+
+us_inset <- ggplot() +
+  geom_sf(data = us_sf, fill = "gray90", color = "white") +
+  geom_sf(data = mn_boundary, fill = "orange", color = "black") +
+  theme_void() +
+  theme(panel.background = element_rect(fill = NA))
+
+inal_map <- ggdraw() +
+  draw_plot(mn_map) +
+  draw_plot(us_inset, x = .6, y = 0.75, width = 0.2, height = 0.2)
+inal_map
+#ggsave("sf_icon_map_inset.jpg",  height = 10, width = 8, dpi = 600)
+```
+
