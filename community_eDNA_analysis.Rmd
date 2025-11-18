@@ -472,7 +472,7 @@ lake
 
 both <- spec + lake + plot_layout(ncol = 2, widths = c(1, 1))
 both
-ggsave(filename = "panneled_plot.jpg", dpi = 600, height = 7, width = 7)
+#ggsave(filename = "panneled_plot.jpg", dpi = 600, height = 7, width = 7)
 
 both <- spec + lake + plot_layout(ncol = 1)
 both
@@ -767,5 +767,203 @@ inal_map <- ggdraw() +
   draw_plot(us_inset, x = .6, y = 0.75, width = 0.2, height = 0.2)
 inal_map
 #ggsave("sf_icon_map_inset.jpg",  height = 10, width = 8, dpi = 600)
+
+###############################################################################
+#saving for smaller fit
+# Get MN boundary as sf
+mn_sf <- states(cb = TRUE, resolution = "500k", year = 2020) %>%
+  filter(STUSPS == "MN") %>%
+  st_transform(26915)
+
+# Convert lake points to sf
+lakes_sf <- st_as_sf(map_plot_data, coords = c("longitude", "latitude"), crs = 4326) %>%
+  st_transform(26915)
+
+#  Extract projected coordinates and keep labels with icons
+lakes_proj <- lakes_sf %>%
+  mutate(
+    longitude = st_coordinates(.)[,1],
+    latitude  = st_coordinates(.)[,2]
+  ) %>%
+  st_drop_geometry()
+
+lakes_proj <- lakes_proj %>%
+  mutate(
+    nudge_x = case_when(
+      lake == "Lake Vermilion"        ~ -50000,
+      lake == "Shagawa Lake"          ~ 60000,
+      lake == "Island Lake Reservoir" ~ -45000,
+      lake == "Leech Lake"            ~ -45000,
+      lake == "Mille Lacs Lake"       ~ -25000,
+      lake == "Forest Lake"           ~ 60000,
+      lake == "White Bear Lake"       ~ -50000,
+      lake == "Lake Phalen"           ~ 65000,
+      lake == "Lake Owasso"           ~ -65000,
+      lake == "Prior Lake"            ~ 12000,
+      TRUE ~ 0
+    ),
+    nudge_y = case_when(
+      lake == "Lake Vermilion"        ~ 2000,
+      lake == "Shagawa Lake"          ~ -3000,
+      lake == "Island Lake Reservoir" ~ 0,
+      lake == "Leech Lake"            ~ 6000,
+      lake == "Mille Lacs Lake"       ~ 30000,
+      lake == "Forest Lake"           ~ 20000,
+      lake == "White Bear Lake"       ~ 60000,
+      lake == "Lake Phalen"           ~ -8000,
+      lake == "Lake Owasso"           ~ 0,
+      lake == "Prior Lake"            ~ -40000,
+      TRUE ~ 0
+    ),
+    icon_size = case_when(
+      lake == "Lake Vermilion" ~ 30, 
+      lake == "Shagawa Lake" ~ 30,
+      lake == "Island Lake Reservoir" ~ 30,
+      lake == "Leech Lake" ~ 25,
+      lake == "Mille Lacs Lake" ~ 50,
+      lake == "Forest Lake" ~ 35,
+      lake == "White Bear Lake" ~ 35,
+      lake == "Lake Phalen" ~ 35,
+      lake == "Lake Owasso" ~ 35,
+      lake == "Prior Lake" ~ 35),
+    label_with_icon = paste0(
+      lake, "<br><img src='", species_icon, "' width='", icon_size, "'/>"
+  ))
+
+key <- jpeg::readJPEG("icons/key.jpg")
+key_grob <- rasterGrob(key, interpolate = T)
+
+mn_map <- ggplot() +
+  geom_sf(data = mn_sf, fill = "white", color = "gray50") +
+  geom_point(data = lakes_proj, aes(x = longitude, y = latitude), size = 2, color = "lightblue") +
+  labs(x = NULL,
+       y = NULL) +
+  geom_segment(
+    data = lakes_proj,
+    aes(x = longitude, y = latitude,
+        xend = longitude + nudge_x,
+        yend = latitude + nudge_y),
+    color = "gray40", linetype = "dashed"
+  ) +
+  geom_richtext(
+    data = lakes_proj,
+    aes(x = longitude + nudge_x, y = latitude + nudge_y, label = label_with_icon),
+    size = 2,
+    label.color = NA,
+    fill = NA
+  ) +
+  annotation_custom(
+    key_grob,
+    xmin = st_bbox(mn_sf)$xmin,   # left
+    xmax = st_bbox(mn_sf)$xmin + 150000,  # adjust width
+    ymin = st_bbox(mn_sf)$ymax - 600000,  # adjust height
+    ymax = st_bbox(mn_sf)$ymax - 300000
+  ) +
+  annotation_scale(location = "br", width_hint = 0.3) +
+  annotation_north_arrow(location = "bl", which_north = "true",
+                         style = north_arrow_fancy_orienteering) +
+  theme_minimal() +
+  coord_sf()
+mn_map
+#ggsave("sf_icon_map.jpg", height = 10, width = 8, dpi = 600)
+
+#with inset
+us_sf <- ne_states(country = "United States of America", returnclass = "sf") %>%
+  st_transform(26915) %>% 
+  filter(!name %in% c("Alaska", "Hawaii"))
+
+mn_boundary <- us_sf %>% filter(name == "Minnesota")
+
+us_inset <- ggplot() +
+  geom_sf(data = us_sf, fill = "gray90", color = "white") +
+  geom_sf(data = mn_boundary, fill = "orange", color = "black") +
+  theme_void() +
+  theme(panel.background = element_rect(fill = NA))
+
+inal_map <- ggdraw() +
+  draw_plot(mn_map) +
+  draw_plot(us_inset, x = .7, y = 0.8, width = 0.2, height = 0.2)
+inal_map
+ggsave("sf_icon_map_inset_small.jpg",  height = 4, width = 4, dpi = 600)
+```
+
+# post-sampling survey results 
+```{r}
+survey <- read_csv("post_sampling_survey.csv")
+glimpse(survey)
+
+rating_questions <- survey %>%
+  select(`Overall, how effective do you feel you were at eDNA sampling?`,
+         `How easily were you able to find and access a sampling location?`,
+         `How easy was it to collect the water sample?`,
+         `How useful were the included written instructions?`,
+         `How useful were the instructional videos?`,
+         `How useful were the pre-sampling webinars?`,
+         `Was the sampling equipment easy to use?`)
+
+percent_4plus <- rating_questions %>%
+  pivot_longer(everything(), names_to = "question", values_to = "rating") %>%
+  group_by(question) %>%
+  summarize(
+    n = sum(!is.na(rating)),
+    above_4 = sum(rating >= 4, na.rm = T),
+    pct_4plus = round(above_4/n * 100, 0),
+    mean_rating = mean(rating, na.rm = TRUE),
+    sd_rating = sd(rating, na.rm = TRUE)
+  )
+
+labels <- c(
+  "Overall, how effective do you feel you were at eDNA sampling?" = "Effective at sampling",
+  "How easily were you able to find and access a sampling location?" = "Finding location",
+  "How easy was it to collect the water sample?" = "Ease of sampling",
+  "How useful were the included written instructions?" = "Written instructions",
+  "How useful were the instructional videos?" = "Instructional videos",
+  "How useful were the pre-sampling webinars?" = "Webinars",
+  "Was the sampling equipment easy to use?" = "Equipment ease"
+)
+
+ratings <- ggplot(percent_4plus, aes(x = reorder(question, -pct_4plus), y = pct_4plus)) +
+  geom_col() +
+  scale_x_discrete(labels = labels) +
+  labs(x = NULL, y = NULL) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),  # tilt labels
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12)
+  )
+ratings
+rm(rating_questions, percent_4plus, labels)
+
+survey %>% 
+  filter(!is.na(`Approximately how long did it take you to collect and filter your sample (not including travel time):`)) %>% 
+  rename(`How Long Did It Take You to Sample?` =
+           `Approximately how long did it take you to collect and filter your sample (not including travel time):`) %>% 
+  summarise(n = n(),
+            n_15 = sum(str_detect(`How Long Did It Take You to Sample?`, "Less")),
+            n_30 = sum(str_detect(`How Long Did It Take You to Sample?`, "15 - 30")),
+            n_60 = sum(str_detect(`How Long Did It Take You to Sample?`, "60"))) %>% 
+  mutate(under_30 = (n_15+n_30)/n)
+
+
+time_pct <- survey %>% 
+  filter(!is.na(`Approximately how long did it take you to collect and filter your sample (not including travel time):`)) %>% 
+  rename(`time` =
+           `Approximately how long did it take you to collect and filter your sample (not including travel time):`) %>% 
+  mutate(time = case_when(time == "Less than 15 minutes" ~ "< 15 mintues",
+                          TRUE ~ time)) %>% 
+  count(`time`) %>% 
+  mutate(pct = n / sum(n) *100) %>% 
+  ggplot() +
+  geom_col(aes(x = reorder(time, -pct), y = pct)) +
+  labs(y = NULL,
+       x = NULL) +
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+time_pct
+
+combined <- ratings + time_pct
+combined
+#ggsave("post_sampling_survey.jpg", height = 5, width = 7, dpi = 600)
 ```
 
